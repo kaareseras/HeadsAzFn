@@ -84,6 +84,7 @@ async def data_get_load() -> None:
                             logging.info(f"Charges for {chargeowner.glnnumber} on {_date}: {charge}")
                             if charge:                     
                                 await insert_charge(charge, chargeowner, token)
+                                await asyncio.sleep(0.5)
     
     if INSERT_SYSTEM_TARIFF_AND_TAX_SW:
         system_tariffs_date = listdates(watermark.taxes_max_date)
