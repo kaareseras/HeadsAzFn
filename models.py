@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import datetime
+from typing import Union
 
 @dataclass
 class Watermark():
@@ -17,6 +18,18 @@ class ChargeOwner:
     chargetypecode: str
     id: int = None
     is_active: bool = True
+
+@dataclass
+class ChargeownerLatestCharge:
+    id: int
+    compagny: str
+    chargetype: str
+    chargetypecode: str
+    glnnumber: str
+    valid_from: Union[None, datetime.datetime] = None
+    valid_to: Union[None, datetime.datetime] = None
+    is_checked: bool = False
+
 
 @dataclass
 class Charge:

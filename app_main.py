@@ -1,12 +1,12 @@
 import ast
-from datetime import datetime
+from datetime import datetime, timedelta
 import azure.functions as func
 import logging
 from connector import Connector
 from login import login
 from watermark import get_watermark
 from listdates import listdates
-from get_chargeowners import load_chargeowners
+from get_chargeowners_with_charge import load_chargeowners_with_last_charge
 from insert_charges import insert_charge
 from models import Watermark, ChargeOwner, Charge
 from aiohttp import ClientSession
@@ -27,10 +27,12 @@ print(f"BASE_URL: {BASE_URL}")
 
 
 INSERT_CHARGE_SW = True
-INSERT_SYSTEM_TARIFF_AND_TAX_SW = True
-INSERT_SPORTPICE_SW = True
+INSERT_SYSTEM_TARIFF_AND_TAX_SW = False
+INSERT_SPORTPICE_SW = False
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+
+FUTURE_DATE = datetime(9999, 12, 31, 23, 59, 59)
 
 async def data_get_load() -> None:
     logging.info('Python HTTP trigger function processed a request.')
@@ -58,36 +60,79 @@ async def data_get_load() -> None:
     
     if INSERT_CHARGE_SW:
 
-        # Get Chargeowners
-        chargeowners = await load_chargeowners(token)
+        async with ClientSession() as session:
+            connector = Connector(session)
 
-        if not chargeowners:
-            return func.HttpResponse(
-                "Failed to retrieve charge owners.",
-                status_code=500
-            )
+            # Get Chargeowners with thir lates charge and see # if they have valid_from and valid_to dates
+            chargeowners_with_latest_charges = await load_chargeowners_with_last_charge(token)
 
+            for chargeowner in chargeowners_with_latest_charges:
+                if not chargeowner.valid_from:
+                    #Fecting first available charge for the chargeowner
+                    charge = await connector.async_get_tariffs(chargeowner, chargeowner.chargetypecode,True)
+                    tariff = charge['tariffs']
+                    logging.info(f"Got charges for {chargeowner.glnnumber}: {charge}")
+                    chargeowner.valid_from = tariff['ValidFrom']
+                    chargeowner.valid_to = tariff['ValidTo']
+                    chargeowner.is_checked = True
+                    logging.info(f"Inserting charge for {chargeowner.glnnumber} with valid from {chargeowner.valid_from} to {chargeowner.valid_to}")
+                    await insert_charge(charge, chargeowner, token)
 
-        charges_date = listdates(watermark.charges_max_date)
+            # Iterate over chargeowners with their latest charges and check if newer values are available
+            # If valid_to is FUTURE_DATE, then we need to check if there are new charges available
+            # If valid_to is not FUTURE_DATE, then we need to check if there are new charges available from valid_to date
+            for chargeowner in chargeowners_with_latest_charges:
 
-        #Get and insert Charges
-        if charges_date:
-            async with ClientSession() as session:
-                connector = Connector(session)
-                for _date in charges_date:
+                _date = datetime.fromisoformat(chargeowner.valid_to)
+                while _date < datetime.now():
                     logging.info(f"Next charge date: {_date}")
-                    for chargeowner in chargeowners:
-                        parsed_list = ast.literal_eval(chargeowner.chargetypecode)
-                        for chargetypecode in parsed_list:
-                            logging.info(f"Charge Owner: {chargeowner.glnnumber}, Company: {chargeowner.compagny}, Charge Type: {chargeowner.chargetype}")
-                            charge = await connector.async_get_tariffs(chargeowner, chargetypecode, _date)
-                            logging.info(f"Charges for {chargeowner.glnnumber} on {_date}: {charge}")
-                            if charge:                     
-                                await insert_charge(charge, chargeowner, token)
-                                await asyncio.sleep(0.5)
-    
+                    if chargeowner.valid_to == FUTURE_DATE and chargeowner.is_checked:
+                        logging.info(f"Charge owner {chargeowner.glnnumber} is already checked and valid to future date, skipping.")
+                        break
+                    elif chargeowner.valid_to == FUTURE_DATE and not chargeowner.is_checked:
+                        logging.info(f"Charge owner {chargeowner.glnnumber} is not checked, checking for new charges.")
+                        date_str = _date.strftime("%Y-%m-%d")
+                        charge = await connector.async_get_tariffs(chargeowner, chargeowner.chargetypecode,False, date_str)
+                        tariff = charge['tariffs']
+                        if tariff['ValidFrom'] != chargeowner.valid_from:
+                            chargeowner.valid_from = tariff['ValidFrom']
+                            chargeowner.valid_to = tariff['ValidTo']
+                            chargeowner.is_checked = True
+                            logging.info(f"Inserting charge for {chargeowner.glnnumber} with valid from {chargeowner.valid_from} to {chargeowner.valid_to}")
+                            await insert_charge(charge, chargeowner, token)
+                            if chargeowner.valid_to is not None:
+                                _date = datetime.fromisoformat(chargeowner.valid_to)
+                        else:
+                            logging.info(f"Charge for {chargeowner.glnnumber} is already valid from {chargeowner.valid_from} to {chargeowner.valid_to}, skipping.")
+                            break
+                    else:
+                        logging.info(f"Charge owner {chargeowner.glnnumber} is less than {_date}, checking for new charges.")
+                        charge = await connector.async_get_tariffs(chargeowner, chargeowner.chargetypecode,False, _date)
+                        tariff = charge['tariffs']
+                        if not tariff:
+                            logging.info(f"No charges found for {chargeowner.glnnumber} on {_date}, skipping.")
+                            break
+                        chargeowner.valid_from = tariff['ValidFrom']
+                        chargeowner.valid_to = tariff['ValidTo']
+                        chargeowner.is_checked = True
+                        logging.info(f"Inserting charge for {chargeowner.glnnumber} with valid from {chargeowner.valid_from} to {chargeowner.valid_to}")
+                        await insert_charge(charge, chargeowner, token)
+                        if chargeowner.valid_to is None:
+                            logging.info(f"Charge owner {chargeowner.glnnumber} has no valid to date, setting to future date.")
+                            chargeowner.valid_to = FUTURE_DATE.isoformat()
+                        if _date == datetime.fromisoformat(chargeowner.valid_to):
+                            logging.info(f"Charge owner {chargeowner.glnnumber} is fully updated to EDS {_date}, skipping.")
+                            break
+                        _date = datetime.fromisoformat(chargeowner.valid_to)
+                        
+                        
+
+
+
+
     if INSERT_SYSTEM_TARIFF_AND_TAX_SW:
         system_tariffs_date = listdates(watermark.taxes_max_date)
+        system_tariffs_date = listdates(datetime(2015, 1, 1))
         async with ClientSession() as session:
             connector = Connector(session)
             for _date in system_tariffs_date:

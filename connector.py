@@ -60,7 +60,7 @@ class Connector:
         data = {"Content-Type": "application/json"}
         return data
     
-    async def async_get_tariffs(self, chargeowner: ChargeOwner, chargetypecode: str, date: datetime | None = None) -> dict:
+    async def async_get_tariffs(self, chargeowner: ChargeOwner, chargetypecode: str, get_first: bool, date: datetime | None = None) -> dict:
         """Get tariff from Eloverblik API."""
 
         if date is None:
@@ -72,14 +72,19 @@ class Connector:
 
         try:
             chargeowner = chargeowner
-
-            limit = "limit=500"
+            
+            limit = "limit=2500"
+            
             objfilter = 'filter=%7B"chargetypecode": ["{}"],"gln_number": ["{}"],"chargetype": {}%7D'.format(  # pylint: disable=consider-using-f-string
                 chargetypecode,
                 chargeowner.glnnumber,
                 chargeowner.chargetype.replace("'", '"'),
-            )
-            sort = "sort=ValidFrom desc"
+                )
+            
+            if get_first:
+                sort = "sort=ValidFrom asc"
+            else:
+                sort = "sort=ValidFrom desc"
 
             query = f"{objfilter}&{sort}&{limit}"
             resp = await self.async_call_api(query)
@@ -93,6 +98,10 @@ class Connector:
                 # We got data from the DataHub - update the dataset
 
                 self._all_tariffs = resp
+
+            if get_first:
+                check_date = self._all_tariffs[0]["ValidFrom"].split("T")[0]
+                _LOGGER.debug("Using first tariff date: %s", check_date)
 
             
 
