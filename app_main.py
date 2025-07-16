@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 
 
+
+
 load_dotenv()
 
 BASE_URL = os.getenv("BASE_URL")
@@ -33,6 +35,14 @@ INSERT_SPORTPICE_SW = False
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 FUTURE_DATE = datetime(9999, 12, 31, 23, 59, 59)
+
+def do_continue(_date: datetime) -> bool:
+    """ Check if the date is in the future or today.
+    """
+    today = datetime.now()
+    if _date < today or _date == FUTURE_DATE:
+        return True
+    return False
 
 async def data_get_load() -> None:
     logging.info('Python HTTP trigger function processed a request.')
@@ -77,6 +87,7 @@ async def data_get_load() -> None:
                     chargeowner.is_checked = True
                     logging.info(f"Inserting charge for {chargeowner.glnnumber} with valid from {chargeowner.valid_from} to {chargeowner.valid_to}")
                     await insert_charge(charge, chargeowner, token)
+                
 
             # Iterate over chargeowners with their latest charges and check if newer values are available
             # If valid_to is FUTURE_DATE, then we need to check if there are new charges available
@@ -84,7 +95,7 @@ async def data_get_load() -> None:
             for chargeowner in chargeowners_with_latest_charges:
 
                 _date = datetime.fromisoformat(chargeowner.valid_to)
-                while _date < datetime.now():
+                while do_continue(_date):
                     logging.info(f"Next charge date: {_date}")
                     if chargeowner.valid_to == FUTURE_DATE and chargeowner.is_checked:
                         logging.info(f"Charge owner {chargeowner.glnnumber} is already checked and valid to future date, skipping.")
