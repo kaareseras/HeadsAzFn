@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 import azure.functions as func
 import logging
 from connector import Connector
+from latest_tarif import get_latest_tarif
+from latest_tax import get_latest_tax
 from login import login
 from watermark import get_watermark
 from listdates import listdates
@@ -29,7 +31,7 @@ print(f"BASE_URL: {BASE_URL}")
 
 
 INSERT_CHARGE_SW = True
-INSERT_SYSTEM_TARIFF_AND_TAX_SW = False
+INSERT_SYSTEM_TARIFF_AND_TAX_SW = True
 INSERT_SPORTPICE_SW = False
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
@@ -142,13 +144,24 @@ async def data_get_load() -> None:
 
 
     if INSERT_SYSTEM_TARIFF_AND_TAX_SW:
-        system_tariffs_date = listdates(watermark.taxes_max_date)
-        system_tariffs_date = listdates(datetime(2015, 1, 1))
-        async with ClientSession() as session:
-            connector = Connector(session)
-            for _date in system_tariffs_date:
-                await insert_tax_and_tarif(token, _date, connector)
-    
+        latest_tarif_valid_to, latest_tax_valid_to, qdate, is_default = await get_latest_date(token)
+
+        first_default = is_default
+
+        while qdate < datetime.now():
+            async with ClientSession() as session:
+                logging.info(f"Latest tarif is valid until {latest_tarif_valid_to}")
+                logging.info(f"Latest tax is valid until {latest_tax_valid_to}")
+                logging.info(f"inserting system tariff and tax.")
+                connector = Connector(session)
+                await insert_tax_and_tarif(token, latest_tarif_valid_to, connector)
+                logging.info(f"System tariff and tax inserted successfully.")
+                latest_tarif_valid_to, latest_tax_valid_to, qdate, is_default = await get_latest_date(token)
+                if first_default and is_default:
+                    logging.info(f"Default date used for tarif and tax: {qdate}")
+                    break
+
+
     if INSERT_SPORTPICE_SW:
         spotprices_date = listdates(watermark.spotprices_max_date)
         for _date in spotprices_date:
@@ -157,6 +170,27 @@ async def data_get_load() -> None:
         
                 
     return func.HttpResponse(f"Token: {watermark}, This HTTP triggered function executed successfully.")
+
+async def get_latest_date(token):
+    latest_tarif_db = await get_latest_tarif(token)
+    latest_tax_db = await get_latest_tax(token)
+
+        # Convert valid_to to datetime if it's a string
+    latest_tarif_valid_to = latest_tarif_db.valid_to
+    latest_tax_valid_to = latest_tax_db.valid_to
+
+    if isinstance(latest_tarif_valid_to, str):
+        latest_tarif_valid_to = datetime.fromisoformat(latest_tarif_valid_to)
+    if isinstance(latest_tax_valid_to, str):
+        latest_tax_valid_to = datetime.fromisoformat(latest_tax_valid_to)
+
+    qdate = min(latest_tarif_valid_to, latest_tax_valid_to)
+    is_default = False
+
+    if qdate == datetime(9999, 12, 31, 23, 59, 59):
+        qdate = datetime.now() - timedelta(days=1)
+        is_default = True
+    return latest_tarif_valid_to,latest_tax_valid_to,qdate,is_default
 
 import asyncio
 
